@@ -21,7 +21,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Generator, List, Optional, Tuple
+from typing import Generator, List, Optional, Tuple, Union
 import requests
 
 # -----------------------------------------------------------------------------
@@ -192,49 +192,64 @@ class TaskManager:
         response = client.generate(prompt, system=dynamic_system, stream=True)
         self.save_files_from_response(response)
 
-    def save_files_from_response(self, response: str) -> Tuple[List[str], Optional[str]]:
-        """Extracts ```lang filename ... ``` blocks and saves them."""
-        # Regex to capture ```[lang] [filename]\n[content]```
-        # Robust pattern: matches optional language, then filename (which might be on same line or next), then content
-        pattern = re.compile(r"```(?:\w+)?(?:[ \t]+)([\w./-]+)[ \t]*\n(.*?)```", re.DOTALL)
-        matches = pattern.findall(response)
-        file_matches = list(matches)
+    def save_files_from_response(self, response: str) -> Tuple[List[str], List[str]]:
+        """Extracts code blocks for files and commands."""
+        # Regex to capture fully fenced blocks: ```header\ncontent```
+        # We capture the header line (group 1) and the content (group 2)
+        block_pattern = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
+        matches = block_pattern.findall(response)
         
-        # Fallback for task_plan (same fallback logic)
-        if not file_matches:
-             fallback_pattern = re.compile(r"```(?:markdown)?\s*\n(.*?)```", re.DOTALL)
-             fallback_matches = fallback_pattern.findall(response)
-             for content in fallback_matches:
-                 if "# Task Plan" in content or "## Phases" in content:
-                     file_matches.append(("task_plan.md", content))
-
         saved_files = []
-        for filename, content in file_matches:
-            # Clean filename
-            filename = filename.strip()
-            if not filename or filename == "---":
-                continue
-            path = Path(filename)
-            if ".." in str(filename) or str(filename).startswith("/"):
-                print(f"⚠️  Skipping unsafe filename: {filename}")
-                continue
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
-                saved_files.append(str(path))
-                print(f"📝 Wrote to {path}")
-            except Exception as e:
-                print(f"❌ Failed to write to {path}: {e}")
-
-        # 2. Extract Commands
-        # Matches ```bash\ncommand```
-        cmd_pattern = re.compile(r"```bash\s*\n(.*?)```", re.DOTALL)
-        cmd_matches = cmd_pattern.findall(response)
-        command_to_run = cmd_matches[0].strip() if cmd_matches else None
+        commands = []
         
-        return saved_files, command_to_run
+        # Helper to check if a token looks like a filename
+        def is_filename(t: str) -> bool:
+            return "." in t or "/" in t or t == "task_plan.md"
 
-    def parse_response(self, response: str) -> Tuple[List[str], Optional[str]]:
+        for header, content in matches:
+            header = header.strip()
+            tokens = header.split()
+            
+            # Detect Command
+            # If header is exactly 'bash' or 'sh' or 'shell' with no filename
+            if len(tokens) == 1 and tokens[0] in ["bash", "sh", "shell"]:
+                commands.append(content.strip())
+                continue
+            
+            # Detect File
+            filename = None
+            if len(tokens) >= 2:
+                # Assume last token is filename, e.g. "python script.py"
+                possible_file = tokens[-1]
+                # Optional: verification?
+                filename = possible_file
+            elif len(tokens) == 1:
+                # Single token: "script.py" or "task_plan.md"
+                if is_filename(tokens[0]):
+                     filename = tokens[0]
+                # Else it's likely just a language "python" -> ignore
+            
+            # Fallback: Check for Task Plan content if no filename detected
+            if not filename and ("# Task Plan" in content or "## Phases" in content):
+                 filename = "task_plan.md"
+            
+            if filename:
+               path = Path(filename)
+               if ".." in str(filename) or str(filename).startswith("/"):
+                   print(f"⚠️  Skipping unsafe filename: {filename}")
+                   continue
+               try:
+                   path.parent.mkdir(parents=True, exist_ok=True)
+                   path.write_text(content, encoding="utf-8")
+                   saved_files.append(str(path))
+                   print(f"📝 Wrote to {path}")
+               except Exception as e:
+                   print(f"❌ Failed to write to {path}: {e}")
+        
+        return saved_files, commands
+
+
+    def parse_response(self, response: str) -> Tuple[List[str], List[str]]:
         return self.save_files_from_response(response)
 
 # -----------------------------------------------------------------------------
@@ -290,9 +305,14 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
         if str(TASK_FILE) not in saved_files:
             print(f"⚠️  Warning: Model did not update {TASK_FILE} this turn.")
         
-        # Execute Command if found
+        # Execute Commands if found
         if command_to_run:
-            last_command_output = executor.execute(command_to_run)
+            for cmd in command_to_run:
+                 cmd = cmd.strip()
+                 if not cmd: continue
+                 # Use accumulator for multiple commands output
+                 out = executor.execute(cmd)
+                 last_command_output += f"\n[{cmd}]:\n{out}\n"
 
         # Optional: check if done
         if "[x] Phase 4" in manager.read_plan() or "Status: Complete" in manager.read_plan():

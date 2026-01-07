@@ -29,9 +29,9 @@ class TestSaveFilesFromResponse(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             os.chdir(tmpdir)
             try:
-                saved_files, command = manager.save_files_from_response(response)
+                saved_files, commands = manager.save_files_from_response(response)
                 self.assertIn("task_plan.md", saved_files)
-                self.assertEqual("ls -la", command)
+                self.assertEqual(["ls -la"], commands)
                 self.assertTrue(Path(tmpdir, "task_plan.md").exists())
             finally:
                 os.chdir(original_cwd)
