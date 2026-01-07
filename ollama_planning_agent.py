@@ -13,13 +13,15 @@ Usage:
 
 """
 
+import subprocess
+
 import argparse
 import json
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Generator, List, Optional, Tuple
 import requests
 
 # -----------------------------------------------------------------------------
@@ -43,13 +45,23 @@ Your goal is to complete the user's objective by iteratively planning, executing
    - To update the plan, you MUST overwrite `task_plan.md` using a file block.
    - To save research or findings, write to `notes.md`.
    - To create deliverables (code, text), write to their respective files.
-4. **Format**:
+4. **Command Execution**:
+   - You can execute shell commands to run tests, list files, or install dependencies.
+   - To run a command, output a fenced code block with the language `bash`.
+     ```bash
+     ls -la
+     ```
+   - Do NOT run interactive commands (like `python` without a script) that require user input.
+5. **Format**:
    - Return code or file content in fenced code blocks:
      ```markdown task_plan.md
      ... content ...
      ```
      ```python script.py
      ... content ...
+     ```
+     ```bash
+     python script.py
      ```
 
 # TASK PLAN TEMPLATE:
@@ -72,44 +84,80 @@ When initializing a new task, use this structure:
 # -----------------------------------------------------------------------------
 
 class OllamaClient:
-    def __init__(self, host: str = OLLAMA_HOST, model: str = DEFAULT_MODEL):
-        self.host = host
+    def __init__(
+        self,
+        model: str,
+        host: str = OLLAMA_HOST,
+        temperature: float = 0.7,
+    ):
         self.model = model
+        self.host = host
+        self.temperature = temperature
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> str:
-        url = f"{self.host}/api/generate"
+    def generate(self, prompt: str, *, system: str = "", stream: bool = False) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
             "system": system,
+            "options": {"temperature": self.temperature},
             "stream": stream,
-            "options": {"temperature": 0.7}
         }
-        
-        try:
-            response = requests.post(url, json=payload, stream=stream, timeout=300)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            print(f"Error communicating with Ollama: {e}")
-            sys.exit(1)
+        response = requests.post(
+            f"{self.host}/api/generate",
+            json=payload,
+            stream=stream,
+            timeout=300,
+        )
+        response.raise_for_status()
 
-        full_response = []
-        if stream:
-            print(f"\n🤖 {self.model} is thinking...\n")
-            for line in response.iter_lines():
-                if line:
-                    data = json.loads(line)
-                    token = data.get("response", "")
-                    print(token, end="", flush=True)
-                    full_response.append(token)
-                    if data.get("done"):
-                        break
-            print("\n")
-        else:
-            data = response.json()
-            full_response.append(data.get("response", ""))
+        if not stream:
+            return response.json().get("response", "")
+
+        chunks: List[str] = []
+        for line in response.iter_lines():
+            if not line:
+                continue
+            message = json.loads(line.decode())
+            if message.get("done"):
+                break
+            token = message.get("response", "")
+            if token:
+                print(token, end="", flush=True)
+                chunks.append(token)
+        print("\n", flush=True)
+        return "".join(chunks)
+
+# -----------------------------------------------------------------------------
+# Command Executor
+# -----------------------------------------------------------------------------
+
+class CommandExecutor:
+    @staticmethod
+    def execute(command: str) -> str:
+        print(f"\n⚠️  Agent wants to execute command:\n    {command}")
+        choice = input("Allow? [y/N]: ").strip().lower()
+        if choice != 'y':
+            print("❌ Access denied by user.")
+            return "User denied command execution."
             
-        return "".join(full_response)
+        print(f"🚀 Executing: {command}")
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            output = result.stdout + result.stderr
+            # Truncate output if too long
+            if len(output) > 2000:
+                output = output[:2000] + "\n...[Output truncated]..."
+            
+            print(f"📄 Output:\n{output}")
+            return output
+        except Exception as e:
+            return f"Error executing command: {e}"
 
 # -----------------------------------------------------------------------------
 # File & Plan Manager
@@ -144,34 +192,32 @@ class TaskManager:
         response = client.generate(prompt, system=dynamic_system, stream=True)
         self.save_files_from_response(response)
 
-    def save_files_from_response(self, response: str) -> List[str]:
+    def save_files_from_response(self, response: str) -> Tuple[List[str], Optional[str]]:
         """Extracts ```lang filename ... ``` blocks and saves them."""
         # Regex to capture ```[lang] [filename]\n[content]```
         # Robust pattern: matches optional language, then filename (which might be on same line or next), then content
         pattern = re.compile(r"```(?:\w+)?(?:[ \t]+)([\w./-]+)[ \t]*\n(.*?)```", re.DOTALL)
         matches = pattern.findall(response)
+        file_matches = list(matches)
         
-        # Fallback: if no filename found, look for ```markdown\n...``` and assume it's task_plan.md if it looks like one
-        if not matches:
+        # Fallback for task_plan (same fallback logic)
+        if not file_matches:
              fallback_pattern = re.compile(r"```(?:markdown)?\s*\n(.*?)```", re.DOTALL)
              fallback_matches = fallback_pattern.findall(response)
              for content in fallback_matches:
                  if "# Task Plan" in content or "## Phases" in content:
-                     matches.append(("task_plan.md", content))
+                     file_matches.append(("task_plan.md", content))
 
         saved_files = []
-        for filename, content in matches:
+        for filename, content in file_matches:
             # Clean filename
             filename = filename.strip()
-            if not filename or filename == "---": # generic separator detected as filename
+            if not filename or filename == "---":
                 continue
-            
             path = Path(filename)
-            # Security check: prevent writing outside cwd (basic)
             if ".." in str(filename) or str(filename).startswith("/"):
                 print(f"⚠️  Skipping unsafe filename: {filename}")
                 continue
-                
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8")
@@ -179,8 +225,17 @@ class TaskManager:
                 print(f"📝 Wrote to {path}")
             except Exception as e:
                 print(f"❌ Failed to write to {path}: {e}")
-            
-        return saved_files
+
+        # 2. Extract Commands
+        # Matches ```bash\ncommand```
+        cmd_pattern = re.compile(r"```bash\s*\n(.*?)```", re.DOTALL)
+        cmd_matches = cmd_pattern.findall(response)
+        command_to_run = cmd_matches[0].strip() if cmd_matches else None
+        
+        return saved_files, command_to_run
+
+    def parse_response(self, response: str) -> Tuple[List[str], Optional[str]]:
+        return self.save_files_from_response(response)
 
 # -----------------------------------------------------------------------------
 # Main Loop
@@ -189,6 +244,7 @@ class TaskManager:
 def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
     client = OllamaClient(model=model)
     manager = TaskManager()
+    executor = CommandExecutor()
 
     # Initialization Phase
     if not continue_mode and not manager.exists():
@@ -200,6 +256,8 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
         print(f"⚠️  {TASK_FILE} already exists. Use --continue to resume or delete it to start over.")
         sys.exit(1)
 
+    last_command_output = ""
+
     # Execution Loop
     for turn in range(1, turns + 1):
         print(f"--- Turn {turn}/{turns} ---")
@@ -209,9 +267,16 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
         # Assemble Prompt
         prompt = (
             f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
+        )
+        
+        if last_command_output:
+            prompt += f"**LAST COMMAND OUTPUT**:\n```\n{last_command_output}\n```\n\n"
+            last_command_output = "" # Clear after using
+            
+        prompt += (
             "INSTRUCTIONS:\n"
             "1. Analyze the plan to determine the next immediate step.\n"
-            "2. Perform the work for that step (write code, create notes, etc.).\n"
+            "2. Perform the work (write code, run commands, create notes).\n"
             "3. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
             "that marks the step as completed or updates the status.\n\n"
             "Go."
@@ -219,32 +284,23 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
 
         response = client.generate(prompt, system=SYSTEM_PROMPT, stream=True)
         
-        # Save any files generated (including the updated plan)
-        saved = manager.save_files_from_response(response)
+        # Save files AND check for commands
+        saved_files, command_to_run = manager.parse_response(response)
         
-        if str(TASK_FILE) not in saved:
+        if str(TASK_FILE) not in saved_files:
             print(f"⚠️  Warning: Model did not update {TASK_FILE} this turn.")
         
+        # Execute Command if found
+        if command_to_run:
+            last_command_output = executor.execute(command_to_run)
+
         # Optional: check if done
         if "[x] Phase 4" in manager.read_plan() or "Status: Complete" in manager.read_plan():
             print("✅ Task appears complete based on plan status.")
             return
-
+            
         time.sleep(1) # Brief pause
 
-    # End of loop - Check if we need to auto-finalize
-    current_plan = manager.read_plan()
-    if "Status: Complete" not in current_plan and "[x] Phase 4" not in current_plan:
-        print("\n⚠️  Loop ended but plan not marked complete. Auto-finalizing...")
-        prompt = (
-            f"The task execution loop has finished. Here is the last known plan:\n{current_plan}\n\n"
-            "INSTRUCTIONS:\n"
-            "1. Review the work done.\n"
-            "2. If the work is actually complete, output the FINAL `task_plan.md` with all items marked [x] and Status: Complete.\n"
-            "3. If not complete, mark the current status accurately."
-        )
-        response = client.generate(prompt, system=SYSTEM_PROMPT, stream=True)
-        manager.save_files_from_response(response)
 
 # -----------------------------------------------------------------------------
 # Entry Point
