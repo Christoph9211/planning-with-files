@@ -17,3 +17,5 @@ notes.md
 # Keep the skill folder clean
 *.log
 *.tmp
+*.pyc
+*__pycache__
