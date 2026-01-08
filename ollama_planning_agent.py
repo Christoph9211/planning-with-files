@@ -17,6 +17,7 @@ import subprocess
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -134,30 +135,70 @@ class OllamaClient:
 class CommandExecutor:
     @staticmethod
     def execute(command: str) -> str:
-        print(f"\n⚠️  Agent wants to execute command:\n    {command}")
-        choice = input("Allow? [y/N]: ").strip().lower()
-        if choice != 'y':
-            print("❌ Access denied by user.")
-            return "User denied command execution."
-            
-        print(f"🚀 Executing: {command}")
+        normalized_command = normalize_command_for_shell(command)
+        if normalized_command != command:
+            print("[i] Command adjusted for this shell.")
+        print(f"\n[!] Agent wants to execute command:\n    {normalized_command}")
+        if not sys.stdin or not sys.stdin.isatty():
+            print("[!] No interactive input available. Skipping command execution.")
+            return "Command execution skipped (no interactive input)."
         try:
+            choice = input("Allow? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("[!] Input cancelled. Skipping command execution.")
+            return "Command execution skipped by user."
+        if choice not in {"y", "yes"}:
+            print("[x] Access denied by user.")
+            return "User denied command execution."
+
+        print(f"[run] Executing: {normalized_command}")
+        try:
+            encoding = sys.stdout.encoding or "utf-8"
             result = subprocess.run(
-                command,
+                normalized_command,
                 shell=True,
                 capture_output=True,
                 text=True,
+                encoding=encoding,
+                errors="replace",
                 timeout=60
             )
-            output = result.stdout + result.stderr
+            output = (result.stdout or "") + (result.stderr or "")
+            if result.returncode != 0:
+                output = f"[exit {result.returncode}]\n{output}"
             # Truncate output if too long
             if len(output) > 2000:
                 output = output[:2000] + "\n...[Output truncated]..."
-            
-            print(f"📄 Output:\n{output}")
+
+            print(f"[output]\n{output}")
             return output
         except Exception as e:
-            return f"Error executing command: {e}"
+            msg = f"Error executing command: {e}"
+            print(f"[error] {msg}")
+            return msg
+
+
+def describe_shell() -> tuple[str, str]:
+    if os.name == "nt":
+        return (os.environ.get("COMSPEC", "cmd.exe"), "windows-cmd")
+    return (os.environ.get("SHELL", "/bin/sh"), "posix-sh")
+
+
+def normalize_command_for_shell(command: str) -> str:
+    _, shell_family = describe_shell()
+    if shell_family != "windows-cmd":
+        return command
+    lines: list[str] = []
+    for line in command.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines.append(line)
+            continue
+        if stripped == "ls" or stripped.startswith("ls "):
+            lines.append("dir")
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 # -----------------------------------------------------------------------------
 # File & Plan Manager
@@ -236,15 +277,15 @@ class TaskManager:
             if filename:
                path = Path(filename)
                if ".." in str(filename) or str(filename).startswith("/"):
-                   print(f"⚠️  Skipping unsafe filename: {filename}")
+                   print(f"[!] Skipping unsafe filename: {filename}")
                    continue
                try:
                    path.parent.mkdir(parents=True, exist_ok=True)
                    path.write_text(content, encoding="utf-8")
                    saved_files.append(str(path))
-                   print(f"📝 Wrote to {path}")
+                   print(f"[write] Wrote to {path}")
                except Exception as e:
-                   print(f"❌ Failed to write to {path}: {e}")
+                   print(f"[error] Failed to write to {path}: {e}")
         
         return saved_files, commands
 
@@ -256,7 +297,14 @@ class TaskManager:
 # Main Loop
 # -----------------------------------------------------------------------------
 
-def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
+def run_agent(goal: str, model: str, turns: int, continue_mode: bool, workdir: Optional[str] = None):
+    if workdir:
+        workdir_path = Path(workdir).expanduser().resolve()
+        if not workdir_path.is_dir():
+            print(f"[error] workdir is not a directory: {workdir_path}")
+            sys.exit(1)
+        os.chdir(workdir_path)
+
     client = OllamaClient(model=model)
     manager = TaskManager()
     executor = CommandExecutor()
@@ -268,7 +316,7 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
             sys.exit(1)
         manager.initialize_plan(goal, client)
     elif goal and not continue_mode and manager.exists():
-        print(f"⚠️  {TASK_FILE} already exists. Use --continue to resume or delete it to start over.")
+        print(f"[!] {TASK_FILE} already exists. Use --continue to resume or delete it to start over.")
         sys.exit(1)
 
     last_command_output = ""
@@ -278,9 +326,13 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
         print(f"--- Turn {turn}/{turns} ---")
         
         current_plan = manager.read_plan()
+        current_dir = Path.cwd()
         
+        shell_name, shell_family = describe_shell()
         # Assemble Prompt
         prompt = (
+            f"Current working directory: {current_dir}\n\n"
+            f"Command shell: {shell_name} ({shell_family})\n\n"
             f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
         )
         
@@ -292,6 +344,8 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
             "INSTRUCTIONS:\n"
             "1. Analyze the plan to determine the next immediate step.\n"
             "2. Perform the work (write code, run commands, create notes).\n"
+            "   - If a command must run in another folder, include `cd <path>`.\n"
+            "   - Use commands compatible with the listed shell; avoid bash-only commands on Windows.\n"
             "3. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
             "that marks the step as completed or updates the status.\n\n"
             "Go."
@@ -303,7 +357,7 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
         saved_files, command_to_run = manager.parse_response(response)
         
         if str(TASK_FILE) not in saved_files:
-            print(f"⚠️  Warning: Model did not update {TASK_FILE} this turn.")
+            print(f"[!] Warning: Model did not update {TASK_FILE} this turn.")
         
         # Execute Commands if found
         if command_to_run:
@@ -316,7 +370,7 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
 
         # Optional: check if done
         if "[x] Phase 4" in manager.read_plan() or "Status: Complete" in manager.read_plan():
-            print("✅ Task appears complete based on plan status.")
+            print("[done] Task appears complete based on plan status.")
             return
             
         time.sleep(1) # Brief pause
@@ -332,7 +386,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Ollama model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--turns", type=int, default=5, help="Maximum number of turns to run")
     parser.add_argument("--continue", dest="continue_mode", action="store_true", help="Continue from existing plan")
+    parser.add_argument("--workdir", help="Working directory for plans, files, and commands")
     
     args = parser.parse_args()
     
-    run_agent(args.goal, args.model, args.turns, args.continue_mode)
+    run_agent(args.goal, args.model, args.turns, args.continue_mode, args.workdir)
