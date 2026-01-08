@@ -8,7 +8,7 @@ Ollama models. It forces the model to maintain a `task_plan.md` file as its
 primary context and memory, updating it after every execution step.
 
 Usage:
-    python ollama_planning_agent.py --goal "Build an useful service that people will be willing to pay for." --model huihui_ai/magistral-abliterated:24b --turns 10 --workdir ./agent_working_directory 
+    python ollama_planning_agent.py --goal "Build a useful service that people will be willing to pay for." --turns 10 --workdir ./agent_working_directory --context-file ./workspace_context.md
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -31,6 +31,7 @@ import requests
 
 DEFAULT_MODEL = "richardyoung/qwen3-14b-abliterated:latest"
 DEFAULT_COMMAND_TIMEOUT = 60
+DEFAULT_NUM_CTX = 40960
 OLLAMA_HOST = "http://localhost:11434"
 TASK_FILE = Path("task_plan.md")
 NOTES_FILE = Path("notes.md")
@@ -93,17 +94,33 @@ class OllamaClient:
         model: str,
         host: str = OLLAMA_HOST,
         temperature: float = 0.7,
+        num_ctx: int = DEFAULT_NUM_CTX,
     ):
         self.model = model
         self.host = host
         self.temperature = temperature
+        self.num_ctx = num_ctx
 
     def generate(self, prompt: str, *, system: str = "", stream: bool = False) -> str:
+        """
+        Generate text using the Ollama AI.
+
+        Args:
+            prompt (str): The prompt to generate text based on.
+            system (str, optional): The system message to provide to the model.
+                Defaults to "".
+            stream (bool, optional): Whether to stream the generated text.
+                Defaults to False.
+
+        Returns:
+            str: The generated text. If stream is True, the returned string is
+                the concatenated output of the streamed text.
+        """
         payload = {
             "model": self.model,
             "prompt": prompt,
             "system": system,
-            "options": {"temperature": self.temperature},
+            "options": {"temperature": self.temperature, "num_ctx": self.num_ctx},
             "stream": stream,
         }
         response = requests.post(
@@ -140,6 +157,20 @@ class CommandExecutor:
         self.timeout_seconds = timeout_seconds
 
     def execute(self, command: str) -> str:
+        """
+        Execute a command in the system shell.
+
+        This function will parse the command to extract any background execution
+        directive and normalize the command for the current shell. It will then
+        prompt the user for permission to execute the command and execute it
+        in the system shell if allowed.
+
+        Args:
+            command: The command to execute in the system shell.
+
+        Returns:
+            The output of the executed command as a string.
+        """
         command, run_in_background = parse_command_directives(command)
         if not command.strip():
             return "Command execution skipped (empty command)."
@@ -198,12 +229,25 @@ class CommandExecutor:
             return msg
 
     def _execute_background(self, command: str) -> str:
+        """
+        Execute a command in the background.
+
+        This function runs a command in the background and returns a message
+        indicating that the process has been started.
+
+        Args:
+            command (str): The command to execute.
+
+        Returns:
+            str: A message indicating that the process has been started.
+        """
         try:
             popen_kwargs = {
                 "shell": True,
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
+                "start_new_session": os.name == "nt",
             }
             if os.name == "nt":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -224,12 +268,31 @@ class CommandExecutor:
 
 
 def describe_shell() -> tuple[str, str]:
+    """
+    Returns a tuple containing the default shell executable and a string indicating the
+    shell family (either "windows-cmd" or "posix-sh").
+
+    :return: A tuple containing the default shell executable and a string indicating the shell family.
+    :rtype: tuple[str, str]
+    """
     if os.name == "nt":
         return (os.environ.get("COMSPEC", "cmd.exe"), "windows-cmd")
-    return (os.environ.get("SHELL", "/bin/sh"), "posix-sh")
+    else:   
+        return (os.environ.get("SHELL", "/bin/sh"), "posix-sh")
 
 
 def normalize_command_for_shell(command: str) -> str:
+    """
+    Normalize a command to be compatible with the current shell.
+
+    This function takes a command string and returns a new string that is
+    compatible with the current shell. For example, if the current shell is
+    cmd.exe, it will replace occurrences of "ls" with "dir".
+
+    :param command: The command string to normalize.
+    :return: A new command string that is compatible with the current shell.
+    :rtype: str
+    """
     _, shell_family = describe_shell()
     if shell_family != "windows-cmd":
         return command
@@ -253,6 +316,17 @@ def normalize_command_for_shell(command: str) -> str:
 
 
 def parse_command_directives(command: str) -> tuple[str, bool]:
+    """
+    Parse a command string for directives and return the cleaned command along with a boolean indicating whether the command should be executed in the background.
+
+    The function splits the command string into lines, checks each line for directives, and if a directive is found, it is removed and the corresponding flag is set.
+
+    The function returns a tuple containing the cleaned command string and a boolean indicating whether the command should be executed in the background.
+
+    :param command: The command string to parse.
+    :return: A tuple containing the cleaned command string and a boolean indicating whether the command should be executed in the background.
+    :rtype: tuple[str, bool]
+    """
     lines = command.splitlines()
     run_in_background = False
     cleaned_lines: list[str] = []
@@ -312,6 +386,18 @@ class TaskManager:
         )
 
     def initialize_plan(self, goal: str, client: OllamaClient):
+        """
+        Initialize a task plan for the given goal using the Ollama client.
+        Dynamically injects the user's goal into the system prompt and requests
+        the model to generate an initial task_plan.md file with defined phases
+        to achieve the specified goal.
+        Args:
+            goal (str): The user's specific goal or task to plan for.
+            client (OllamaClient): The Ollama client instance used to generate
+                the plan via the model.
+        Returns:
+            None. Saves the generated task_plan.md file using save_files_from_response.
+        """
         print(f"Creating initial plan for goal: '{goal}'")
         
         # Inject the goal dynamically into the system prompt for strongest effect
@@ -395,6 +481,29 @@ def run_agent(
     workdir: Optional[str] = None,
     context_file: Optional[str] = None,
 ):
+    """
+    Main loop for the Planning with Files agent.
+
+    Parameters:
+    goal (str): initial goal to start planning with
+    model (str): Ollama model to use
+    turns (int): maximum number of turns to run the agent for
+    continue_mode (bool): whether to resume from an existing plan (True) or start over (False)
+    workdir (Optional[str]): optional working directory to change into before running the agent
+    context_file (Optional[str]): optional context file to read from at the start of each turn
+
+    The agent will:
+    - Initialize the plan if it doesn't exist
+    - Read the current plan and context file (if provided)
+    - Assemble a prompt based on the current plan, context, and last command output
+    - Send the prompt to the Ollama model and get a response
+    - Parse the response for files to write and commands to run
+    - Save the files and run the commands
+    - Repeat until the maximum number of turns is reached or the plan is marked as complete
+
+    Returns:
+    None
+    """
     if workdir:
         workdir_path = Path(workdir).expanduser().resolve()
         if not workdir_path.is_dir():

@@ -1,6 +1,7 @@
  // Ollama API configuration
         const OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
         const DEFAULT_MODEL = 'richardyoung/qwen3-14b-abliterated:latest'; // Change this to your preferred model
+        const DEFAULT_NUM_CTX = 40960; // Increase for larger context windows
 
         // Ollama API helper functions
         async function callOllama(prompt, streaming = false) {
@@ -16,7 +17,8 @@
                         stream: streaming,
                         options: {
                             temperature: 0.7,
-                            top_p: 0.9
+                            top_p: 0.9,
+                            num_ctx: DEFAULT_NUM_CTX
                         }
                     })
                 });
@@ -50,7 +52,8 @@
                         stream: true,
                         options: {
                             temperature: 0.7,
-                            top_p: 0.9
+                            top_p: 0.9,
+                            num_ctx: DEFAULT_NUM_CTX
                         }
                     })
                 });

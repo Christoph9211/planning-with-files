@@ -100,6 +100,14 @@ class LLMMovementController {
 
   // --- Parsing & synthesis helpers ---
 
+  /**
+   * Safely parses a JSON object from a given text string. If the text does not
+   * contain a valid JSON object, returns null. If the text contains a JSON
+   * object wrapped in curly braces, that object is parsed. Otherwise, the
+   * entire text string is parsed as JSON.
+   * @param {string} text - The text string to parse.
+   * @returns {Object|null} The parsed JSON object, or null if parsing failed.
+   */
   safeParseSpec(text) {
     if (!text) return null;
     try {
@@ -111,6 +119,16 @@ class LLMMovementController {
     }
   }
 
+  /**
+   * Parse a string describing a movement pattern and returns an object with
+   * parsed parameters. The string is expected to contain keywords that
+   * describe the intensity, frequency, smoothness, and variation of the
+   * movement. See the implementation for the exact keywords and their effects.
+   *
+   * @param {string} text - The string to parse.
+   *
+   * @returns {Object} An object with the parsed parameters.
+   */
   parseMovementOutput(text) {
     const params = {
       intensity: 0.5,
@@ -127,6 +145,18 @@ class LLMMovementController {
     return params;
   }
 
+  /**
+   * Converts a movement specification object to a sequence of commands
+   * for a linear actuator.
+   *
+   * @param {Object} params - A movement specification object with the following
+   *   properties: intensity (0 to 1), frequency (0 to 1), smoothness (0 to 1),
+   *   and variation (0 to 1).
+   * @param {number} duration - The duration of the movement in milliseconds.
+   * @param {number} [startValue=0] - The value to blend from at the start of the movement.
+   * @returns {number[]} An array of commands for the linear actuator, where each command
+   *   is a value between 0 and 1 representing the intensity of the movement.
+   */
   convertToActuatorCommands(params, duration, startValue = 0) {
     const steps = Math.max(1, Math.floor(duration / 100));
     const commands = [];
@@ -144,12 +174,15 @@ class LLMMovementController {
     return this._postProcess(commands, { maxDelta: 0.12, smoothAlpha: 0.35 });
   }
 
-  /**
-   * Synthesizes a movement pattern from a specification.
-   * @param {Object} spec - The specification object
-   * @param {number} duration - The duration of the pattern in ms
-   * @param {number} startValue - The value to blend from at the start
-   */
+/**
+ * Synthesizes a movement sequence based on the given spec and duration.
+ * @param {Object} spec - The spec object returned from the LLM.
+ * @param {number} duration - The duration of the pattern in ms.
+ * @param {number} startValue - The starting intensity of the pattern. Defaults to 0.
+ * @returns {number[]} A 1D array of numbers representing the movement pattern.
+ *   The values should be in the range [0, 1] and represent the intensity of the
+ *   movement at each point in time.
+ */
   synthesizeFromPhases(spec, duration, startValue = 0) {
     const steps = Math.max(1, Math.floor(duration / 100));
     const phases = this._normalizePhases(spec.phases);
@@ -212,6 +245,12 @@ class LLMMovementController {
     return this._postProcess(curve, { maxDelta: 0.15, smoothAlpha: 0.2 });
   }
 
+/**
+ * Normalizes a list of phases by ensuring all properties have valid values,
+ * and the total duration ratio of all phases sums up to 1.
+ * @param {Array} phases - The list of phases to normalize.
+ * @returns {Array} The normalized list of phases.
+ */
   _normalizePhases(phases) {
     const sanitized = phases.map(p => ({
       name: String(p.name || ''),
@@ -230,6 +269,12 @@ class LLMMovementController {
     return sanitized.map(p => ({ ...p, duration_ratio: p.duration_ratio / sum }));
   }
 
+/**
+ * Returns the phase at the given time index t.
+ * @param {Array} phases - The list of phases to search through.
+ * @param {number} t - The time index to search for.
+ * @returns {Object} The phase at the given time index t, or the last phase if t is out of range.
+ */
   _phaseAtIndex(phases, t) {
     let acc = 0;
     for (const p of phases) {
@@ -240,6 +285,14 @@ class LLMMovementController {
     return phases[phases.length - 1];
   }
 
+/**
+ * Applies a curve to a given value in the range [0, 1).
+ * The curve is defined by the given name.
+ * @param {number} t - The value to apply the curve to.
+ * @param {string} name - The name of the curve to apply.
+ * @returns {number} The value of the curve evaluated at t.
+ * @see https://easings.net/play#easeinout for more information on the easing curves.
+ */
   _applyCurve(t, name) {
     const x = this._clamp01(t);
     switch ((name || '').toLowerCase()) {
@@ -253,9 +306,18 @@ class LLMMovementController {
     }
   }
 
-  /**
-   * Applies physics-like properties: limit abrupt velocity changes and smooth momentum.
-   */
+  
+/**
+ * Post-processes an array of actuator commands to limit velocity and smooth out
+ * the sequence.
+ *
+ * @param {number[]} arr - The array of actuator commands to post-process.
+ * @param {Object} [options] - Options for post-processing.
+ * @param {number} [options.maxDelta=0.2] - The maximum allowed change in actuator command
+ *   between consecutive steps.
+ * @param {number} [options.smoothAlpha=0.3] - The smoothing factor for momentum smoothing.
+ * @returns {number[]} The post-processed array of actuator commands.
+ */
   _postProcess(arr, { maxDelta = 0.2, smoothAlpha = 0.3 } = {}) {
     const res = arr.slice();
     // 1. Velocity Clamp
@@ -279,6 +341,12 @@ class LLMMovementController {
   _lerp(a, b, t) { return a + (b - a) * t; }
   _clamp01(x) { return Math.max(0, Math.min(1, x)); }
 
+/**
+ * Returns a pseudorandom number generator seeded by the given value.
+ * Based on the Mulberry32 algorithm.
+ * @param {number} seed - The seed value to generate the pseudorandom number generator from.
+ * @returns {function()} A function that returns a pseudorandom number between 0 and 1 when called.
+ */
   _mulberry32(seed) {
     let t = (seed >>> 0) + 0x6D2B79F5;
     return function () {
@@ -288,6 +356,13 @@ class LLMMovementController {
     };
   }
 
+  /**
+   * Generates a noise curve using the midpoint displacement algorithm.
+   * @param {number} n - The length of the noise curve.
+   * @param {function} rand - A random number generator.
+   * @param {number} octaves - The number of octaves to generate noise for. Default is 3.
+   * @returns {number[]} A noise curve of length n.
+   */
   _fbmNoise(n, rand, octaves = 3) {
     const base = new Array(n).fill(0).map(() => rand());
     const out = new Array(n).fill(0);
@@ -303,6 +378,19 @@ class LLMMovementController {
     return out;
   }
 
+/**
+ * Smooths an array by convolving it with a sliding window.
+ * @param {number[]} arr - The array to smooth.
+ * @param {number} windowSize - The size of the sliding window.
+ * @returns {number[]} The smoothed array.
+ * @description
+ * This function applies a simple moving average filter to the input array.
+ * The filtered array is then returned. The window size determines the size
+ * of the filter, and the output array will have the same length as the input
+ * array. The filtered value at each index is the average of the values in
+ * the window centered at that index, or the average of all values to the
+ * left of that index if the index is less than the window size.
+ */
   _smoothArray(arr, windowSize) {
     const out = new Array(arr.length).fill(0);
     const w = Math.max(1, windowSize | 0);
@@ -315,6 +403,15 @@ class LLMMovementController {
     return out;
   }
 
+  /**
+   * Generates a simple fallback pattern if the LLM does not return a valid sequence.
+   * This pattern is a sine fade from the startValue.
+   * @param {number} duration - The duration of the pattern in ms.
+   * @param {number} [startValue=0.5] - The starting intensity of the pattern.
+   * @returns {number[]} A 1D array of numbers representing the movement pattern.
+   *   The values should be in the range [0, 1] and represent the intensity of the
+   *   movement at each point in time.
+   */
   generateFallbackPattern(duration, startValue = 0.5) {
     const steps = Math.floor(duration / 100);
     // Simple sine fade from startValue
