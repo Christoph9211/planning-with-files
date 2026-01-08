@@ -29,7 +29,8 @@ import requests
 # Configuration & Constants
 # -----------------------------------------------------------------------------
 
-DEFAULT_MODEL = "ministral-3:14b"
+DEFAULT_MODEL = "richardyoung/qwen3-14b-abliterated:latest"
+DEFAULT_COMMAND_TIMEOUT = 60
 OLLAMA_HOST = "http://localhost:11434"
 TASK_FILE = Path("task_plan.md")
 NOTES_FILE = Path("notes.md")
@@ -52,6 +53,7 @@ Your goal is to complete the user's objective by iteratively planning, executing
      ```bash
      ls -la
      ```
+   - For long-running commands (servers/watchers), add `# background` as the first non-empty line.
    - Do NOT run interactive commands (like `python` without a script) that require user input.
 5. **Format**:
    - Return code or file content in fenced code blocks:
@@ -134,8 +136,13 @@ class OllamaClient:
 # -----------------------------------------------------------------------------
 
 class CommandExecutor:
-    @staticmethod
-    def execute(command: str) -> str:
+    def __init__(self, timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT):
+        self.timeout_seconds = timeout_seconds
+
+    def execute(self, command: str) -> str:
+        command, run_in_background = parse_command_directives(command)
+        if not command.strip():
+            return "Command execution skipped (empty command)."
         normalized_command = normalize_command_for_shell(command)
         if normalized_command != command:
             print("[i] Command adjusted for this shell.")
@@ -152,6 +159,10 @@ class CommandExecutor:
             print("[x] Access denied by user.")
             return "User denied command execution."
 
+        if run_in_background:
+            print(f"[run] Executing in background: {normalized_command}")
+            return self._execute_background(normalized_command)
+
         print(f"[run] Executing: {normalized_command}")
         try:
             encoding = sys.stdout.encoding or "utf-8"
@@ -162,7 +173,7 @@ class CommandExecutor:
                 text=True,
                 encoding=encoding,
                 errors="replace",
-                timeout=60
+                timeout=self.timeout_seconds
             )
             output = (result.stdout or "") + (result.stderr or "")
             if result.returncode != 0:
@@ -173,8 +184,41 @@ class CommandExecutor:
 
             print(f"[output]\n{output}")
             return output
+        except subprocess.TimeoutExpired as e:
+            output = (e.stdout or "") + (e.stderr or "")
+            if output:
+                output = f"{output}\n...[Command timed out after {self.timeout_seconds}s]..."
+            else:
+                output = f"Command timed out after {self.timeout_seconds}s."
+            print(f"[output]\n{output}")
+            return output
         except Exception as e:
             msg = f"Error executing command: {e}"
+            print(f"[error] {msg}")
+            return msg
+
+    def _execute_background(self, command: str) -> str:
+        try:
+            popen_kwargs = {
+                "shell": True,
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                if hasattr(subprocess, "DETACHED_PROCESS"):
+                    creationflags |= subprocess.DETACHED_PROCESS
+                popen_kwargs["creationflags"] = creationflags
+            else:
+                popen_kwargs["start_new_session"] = True
+
+            proc = subprocess.Popen(command, **popen_kwargs)
+            output = f"Started background process (pid {proc.pid})."
+            print(f"[output]\n{output}")
+            return output
+        except Exception as e:
+            msg = f"Error executing background command: {e}"
             print(f"[error] {msg}")
             return msg
 
@@ -206,6 +250,24 @@ def normalize_command_for_shell(command: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def parse_command_directives(command: str) -> tuple[str, bool]:
+    lines = command.splitlines()
+    run_in_background = False
+    cleaned_lines: list[str] = []
+    directive_tokens = {"# background", "# bg", "# detach"}
+
+    for line in lines:
+        stripped = line.strip()
+        if not cleaned_lines and stripped:
+            if stripped.lower() in directive_tokens:
+                run_in_background = True
+                continue
+        cleaned_lines.append(line)
+
+    cleaned_command = "\n".join(cleaned_lines).strip()
+    return cleaned_command, run_in_background
 
 
 def resolve_context_path(context_file: Optional[str]) -> Optional[Path]:
@@ -242,6 +304,12 @@ class TaskManager:
         if not self.exists():
             return "No plan exists yet."
         return self.task_file.read_text(encoding="utf-8")
+
+    def plan_update_alert(self) -> str:
+        return (
+            f"ALERT: You did not update `{self.task_file}` in the previous turn. "
+            "You must update it this turn with a file block, even if no other files change.\n\n"
+        )
 
     def initialize_plan(self, goal: str, client: OllamaClient):
         print(f"Creating initial plan for goal: '{goal}'")
@@ -352,6 +420,7 @@ def run_agent(
         sys.exit(1)
 
     last_command_output = ""
+    missed_plan_update = False
 
     # Execution Loop
     for turn in range(1, turns + 1):
@@ -373,7 +442,11 @@ def run_agent(
                 f"{context_text}\n\n"
             )
         prompt += f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
-        
+
+        if missed_plan_update:
+            prompt += manager.plan_update_alert()
+            missed_plan_update = False
+
         if last_command_output:
             prompt += f"**LAST COMMAND OUTPUT**:\n```\n{last_command_output}\n```\n\n"
             last_command_output = "" # Clear after using
@@ -384,6 +457,7 @@ def run_agent(
             "2. Perform the work (write code, run commands, create notes).\n"
             "   - If a command must run in another folder, include `cd <path>`.\n"
             "   - Use commands compatible with the listed shell; avoid bash-only commands on Windows.\n"
+            "   - For long-running commands, add `# background` as the first non-empty line.\n"
             "3. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
             "that marks the step as completed or updates the status.\n\n"
             "Go."
@@ -396,6 +470,7 @@ def run_agent(
         
         if str(TASK_FILE) not in saved_files:
             print(f"[!] Warning: Model did not update {TASK_FILE} this turn.")
+            missed_plan_update = True
         
         # Execute Commands if found
         if command_to_run:
