@@ -80,7 +80,7 @@ print("Space before python")
         # Should parse correctly
         self.assertIn("script.py", files)
 
-    def test_fallback_task_plan(self):
+    def test_missing_filename_no_fallback(self):
         # Case: Model forgets filename but provides plan content
         response = """
 ```markdown
@@ -90,7 +90,7 @@ print("Space before python")
 ```
         """
         files, cmds = self.manager.save_files_from_response(response)
-        self.assertIn("task_plan.md", files)
+        self.assertEqual(files, [])
 
 
 if __name__ == '__main__':

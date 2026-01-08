@@ -19,3 +19,4 @@ notes.md
 *.tmp
 *.pyc
 *__pycache__
+agent_working_directory/venv

@@ -8,7 +8,7 @@ Ollama models. It forces the model to maintain a `task_plan.md` file as its
 primary context and memory, updating it after every execution step.
 
 Usage:
-    python ollama_planning_agent.py --goal "Build a simple weather dashboard" --model llama3
+    python ollama_planning_agent.py --goal "Build an useful service that people will be willing to pay for." --model huihui_ai/magistral-abliterated:24b --turns 10 --workdir ./agent_working_directory 
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -22,7 +22,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Generator, List, Optional, Tuple, Union
+from typing import  List, Optional, Tuple
 import requests
 
 # -----------------------------------------------------------------------------
@@ -64,6 +64,7 @@ Your goal is to complete the user's objective by iteratively planning, executing
      ```bash
      python script.py
      ```
+   - Every file block MUST include a filename in the fence header. Blocks without a filename will be ignored.
 
 # TASK PLAN TEMPLATE:
 When initializing a new task, use this structure:
@@ -194,11 +195,36 @@ def normalize_command_for_shell(command: str) -> str:
         if not stripped:
             lines.append(line)
             continue
+        if stripped.startswith("#"):
+            # Strip shell-style comments that break cmd.exe.
+            continue
         if stripped == "ls" or stripped.startswith("ls "):
-            lines.append("dir")
+            if stripped == "ls":
+                lines.append("dir")
+            else:
+                lines.append(f"dir {stripped[3:]}")
             continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def resolve_context_path(context_file: Optional[str]) -> Optional[Path]:
+    if not context_file:
+        return None
+    path = Path(context_file).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    return path
+
+
+def read_context_file(context_path: Optional[Path]) -> str:
+    if not context_path or not context_path.exists():
+        return ""
+    try:
+        return context_path.read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"[error] Failed to read context file {context_path}: {e}")
+        return ""
 
 # -----------------------------------------------------------------------------
 # File & Plan Manager
@@ -270,10 +296,6 @@ class TaskManager:
                      filename = tokens[0]
                 # Else it's likely just a language "python" -> ignore
             
-            # Fallback: Check for Task Plan content if no filename detected
-            if not filename and ("# Task Plan" in content or "## Phases" in content):
-                 filename = "task_plan.md"
-            
             if filename:
                path = Path(filename)
                if ".." in str(filename) or str(filename).startswith("/"):
@@ -297,7 +319,14 @@ class TaskManager:
 # Main Loop
 # -----------------------------------------------------------------------------
 
-def run_agent(goal: str, model: str, turns: int, continue_mode: bool, workdir: Optional[str] = None):
+def run_agent(
+    goal: str,
+    model: str,
+    turns: int,
+    continue_mode: bool,
+    workdir: Optional[str] = None,
+    context_file: Optional[str] = None,
+):
     if workdir:
         workdir_path = Path(workdir).expanduser().resolve()
         if not workdir_path.is_dir():
@@ -308,6 +337,9 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool, workdir: O
     client = OllamaClient(model=model)
     manager = TaskManager()
     executor = CommandExecutor()
+    context_path = resolve_context_path(context_file)
+    if context_path and not context_path.exists():
+        print(f"[i] Context file not found yet: {context_path}")
 
     # Initialization Phase
     if not continue_mode and not manager.exists():
@@ -327,14 +359,20 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool, workdir: O
         
         current_plan = manager.read_plan()
         current_dir = Path.cwd()
+        context_text = read_context_file(context_path)
         
         shell_name, shell_family = describe_shell()
         # Assemble Prompt
         prompt = (
             f"Current working directory: {current_dir}\n\n"
             f"Command shell: {shell_name} ({shell_family})\n\n"
-            f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
         )
+        if context_text:
+            prompt += (
+                f"Workspace context (from {context_path}):\n"
+                f"{context_text}\n\n"
+            )
+        prompt += f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
         
         if last_command_output:
             prompt += f"**LAST COMMAND OUTPUT**:\n```\n{last_command_output}\n```\n\n"
@@ -387,7 +425,18 @@ if __name__ == "__main__":
     parser.add_argument("--turns", type=int, default=5, help="Maximum number of turns to run")
     parser.add_argument("--continue", dest="continue_mode", action="store_true", help="Continue from existing plan")
     parser.add_argument("--workdir", help="Working directory for plans, files, and commands")
+    parser.add_argument(
+        "--context-file",
+        help="Path to a workspace context file to inject into the prompt each turn",
+    )
     
     args = parser.parse_args()
     
-    run_agent(args.goal, args.model, args.turns, args.continue_mode, args.workdir)
+    run_agent(
+        args.goal,
+        args.model,
+        args.turns,
+        args.continue_mode,
+        args.workdir,
+        args.context_file,
+    )
