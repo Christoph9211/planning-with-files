@@ -29,7 +29,7 @@ import requests
 # Configuration & Constants
 # -----------------------------------------------------------------------------
 
-DEFAULT_MODEL = "richardyoung/qwen3-14b-abliterated:latest"
+DEFAULT_MODEL = "huihui_ai/gpt-oss-abliterated:20b"
 DEFAULT_COMMAND_TIMEOUT = 60
 DEFAULT_NUM_CTX = 40960
 OLLAMA_HOST = "http://localhost:11434"
@@ -44,11 +44,14 @@ Your goal is to complete the user's objective by iteratively planning, executing
 
 1. **The Plan is Truth**: You must heavily rely on `task_plan.md`. It is your long-term memory.
 2. **One Step at a Time**: Read the plan, identify the next incomplete phase/step, execute it, and then UPDATE the plan.
-3. **File Operations**:
+3. **Verify Before Completing**: Do not mark a step as completed until you have verified the outcome.
+   - Verification should be concrete (e.g., command output, opening a file, or a written checklist).
+   - If you cannot verify yet, keep the step unchecked and add a follow-up verification sub-step.
+4. **File Operations**:
    - To update the plan, you MUST overwrite `task_plan.md` using a file block.
    - To save research or findings, write to `notes.md`.
    - To create deliverables (code, text), write to their respective files.
-4. **Command Execution**:
+5. **Command Execution**:
    - You can execute shell commands to run tests, list files, or install dependencies.
    - To run a command, output a fenced code block with the language `bash`.
      ```bash
@@ -56,7 +59,7 @@ Your goal is to complete the user's objective by iteratively planning, executing
      ```
    - For long-running commands (servers/watchers), add `# background` as the first non-empty line.
    - Do NOT run interactive commands (like `python` without a script) that require user input.
-5. **Format**:
+6. **Format**:
    - Return code or file content in fenced code blocks:
      ```markdown task_plan.md
      ... content ...
@@ -191,7 +194,7 @@ class CommandExecutor:
             return "User denied command execution."
 
         if run_in_background:
-            print(f"[run] Executing in background: {normalized_command}")
+            print(f"[bg] Starting background command: {normalized_command}")
             return self._execute_background(normalized_command)
 
         print(f"[run] Executing: {normalized_command}")
@@ -258,6 +261,7 @@ class CommandExecutor:
                 popen_kwargs["start_new_session"] = True
 
             proc = subprocess.Popen(command, **popen_kwargs)
+            self._log_background_command(command, proc.pid)
             output = f"Started background process (pid {proc.pid})."
             print(f"[output]\n{output}")
             return output
@@ -265,6 +269,17 @@ class CommandExecutor:
             msg = f"Error executing background command: {e}"
             print(f"[error] {msg}")
             return msg
+
+    def _log_background_command(self, command: str, pid: Optional[int] = None) -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        pid_part = f" pid={pid}" if pid else ""
+        log_line = f"[bg] {timestamp}{pid_part} {command}\n"
+        try:
+            NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with NOTES_FILE.open("a", encoding="utf-8") as handle:
+                handle.write(log_line)
+        except Exception as e:
+            print(f"[error] Failed to write background log to {NOTES_FILE}: {e}")
 
 
 def describe_shell() -> tuple[str, str]:
@@ -567,7 +582,9 @@ def run_agent(
             "   - If a command must run in another folder, include `cd <path>`.\n"
             "   - Use commands compatible with the listed shell; avoid bash-only commands on Windows.\n"
             "   - For long-running commands, add `# background` as the first non-empty line.\n"
-            "3. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
+            "3. Double-check your work before marking a step complete.\n"
+            "   - If you did not verify it yet, keep it unchecked and add a verification sub-step.\n"
+            "4. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
             "that marks the step as completed or updates the status.\n\n"
             "Go."
         )
