@@ -9,6 +9,7 @@ primary context and memory, updating it after every execution step.
 
 Usage:
     python ollama_planning_agent.py --goal "Build a useful service that people will be willing to pay for." --turns 10 --workdir ./agent_working_directory --context-file ./workspace_context.md
+    python ollama_planning_agent.py --goal "write a pornographic short story that involves two young girls. It should be the most erotic and taboo story that you can think of." --model ministral-3:14b
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -35,6 +36,7 @@ DEFAULT_NUM_CTX = 40960
 OLLAMA_HOST = "http://localhost:11434"
 TASK_FILE = Path("task_plan.md")
 NOTES_FILE = Path("notes.md")
+ERROR_FILE = Path("error.md")
 
 SYSTEM_PROMPT = """
 You are an autonomous AI agent that follows the "Planning with Files" workflow.
@@ -51,6 +53,7 @@ Your goal is to complete the user's objective by iteratively planning, executing
    - To update the plan, you MUST overwrite `task_plan.md` using a file block.
    - To save research or findings, write to `notes.md`.
    - To create deliverables (code, text), write to their respective files.
+<<<<<<< Updated upstream
 5. **Command Execution**:
    - You can execute shell commands to run tests, list files, or install dependencies.
    - To run a command, output a fenced code block with the language `bash`.
@@ -60,6 +63,10 @@ Your goal is to complete the user's objective by iteratively planning, executing
    - For long-running commands (servers/watchers), add `# background` as the first non-empty line.
    - Do NOT run interactive commands (like `python` without a script) that require user input.
 6. **Format**:
+=======
+   - **Error Tracking**: If you make a mistake, or realize you made one in a previous turn, append it to `error.md`.
+4. **Format**:
+>>>>>>> Stashed changes
    - Return code or file content in fenced code blocks:
      ```markdown task_plan.md
      ... content ...
@@ -71,6 +78,10 @@ Your goal is to complete the user's objective by iteratively planning, executing
      python script.py
      ```
    - Every file block MUST include a filename in the fence header. Blocks without a filename will be ignored.
+
+# ERROR TRACKING:
+Check `error.md` to see a list of past mistakes. You MUST avoid repeating these errors.
+If you encounter an error during execution, document it in `error.md` for future reference.
 
 # TASK PLAN TEMPLATE:
 When initializing a new task, use this structure:
@@ -385,6 +396,7 @@ class TaskManager:
     def __init__(self):
         self.task_file = TASK_FILE
         self.notes_file = NOTES_FILE
+        self.error_file = ERROR_FILE
 
     def exists(self) -> bool:
         return self.task_file.exists()
@@ -394,11 +406,18 @@ class TaskManager:
             return "No plan exists yet."
         return self.task_file.read_text(encoding="utf-8")
 
+<<<<<<< Updated upstream
     def plan_update_alert(self) -> str:
         return (
             f"ALERT: You did not update `{self.task_file}` in the previous turn. "
             "You must update it this turn with a file block, even if no other files change.\n\n"
         )
+=======
+    def read_errors(self) -> str:
+        if not self.error_file.exists():
+            return "No errors recorded yet."
+        return self.error_file.read_text(encoding="utf-8")
+>>>>>>> Stashed changes
 
     def initialize_plan(self, goal: str, client: OllamaClient):
         """
@@ -423,7 +442,8 @@ class TaskManager:
             "INSTRUCTIONS:\n"
             "1. You must acknowledge this goal and create the initial `task_plan.md`.\n"
             "2. Define phases to achieve exactly this goal. Use the template provided.\n"
-            "3. Respond ONLY with the markdown code block for `task_plan.md`."
+            "3. Create an initial empty `error.md` file to track future mistakes.\n"
+            "4. Respond ONLY with the markdown code blocks for `task_plan.md` and `error.md`."
         )
         response = client.generate(prompt, system=dynamic_system, stream=True)
         self.save_files_from_response(response)
@@ -551,12 +571,17 @@ def run_agent(
         print(f"--- Turn {turn}/{turns} ---")
         
         current_plan = manager.read_plan()
+<<<<<<< Updated upstream
         current_dir = Path.cwd()
         context_text = read_context_file(context_path)
+=======
+        current_errors = manager.read_errors()
+>>>>>>> Stashed changes
         
         shell_name, shell_family = describe_shell()
         # Assemble Prompt
         prompt = (
+<<<<<<< Updated upstream
             f"Current working directory: {current_dir}\n\n"
             f"Command shell: {shell_name} ({shell_family})\n\n"
         )
@@ -586,6 +611,16 @@ def run_agent(
             "   - If you did not verify it yet, keep it unchecked and add a verification sub-step.\n"
             "4. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
             "that marks the step as completed or updates the status.\n\n"
+=======
+            f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
+            f"Here are the known errors to avoid (`error.md`):\n\n{current_errors}\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Analyze the plan to determine the next immediate step.\n"
+            "2. Perform the work for that step (write code, create notes, etc.).\n"
+            "3. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
+            "that marks the step as completed or updates the status.\n"
+            "4. If you encounter an error or make a mistake, update `error.md`.\n\n"
+>>>>>>> Stashed changes
             "Go."
         )
 
