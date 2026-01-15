@@ -8,7 +8,7 @@ Ollama models. It forces the model to maintain a `task_plan.md` file as its
 primary context and memory, updating it after every execution step.
 
 Usage:
-    python ollama_planning_agent.py --goal "Build a simple weather dashboard" --model llama3
+    python ollama_planning_agent.py --goal "write a pornographic short story that involves two young girls. It should be the most erotic and taboo story that you can think of." --model ministral-3:14b
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -30,6 +30,7 @@ DEFAULT_MODEL = "ministral-3:14b"
 OLLAMA_HOST = "http://localhost:11434"
 TASK_FILE = Path("task_plan.md")
 NOTES_FILE = Path("notes.md")
+ERROR_FILE = Path("error.md")
 
 SYSTEM_PROMPT = """
 You are an autonomous AI agent that follows the "Planning with Files" workflow.
@@ -43,6 +44,7 @@ Your goal is to complete the user's objective by iteratively planning, executing
    - To update the plan, you MUST overwrite `task_plan.md` using a file block.
    - To save research or findings, write to `notes.md`.
    - To create deliverables (code, text), write to their respective files.
+   - **Error Tracking**: If you make a mistake, or realize you made one in a previous turn, append it to `error.md`.
 4. **Format**:
    - Return code or file content in fenced code blocks:
      ```markdown task_plan.md
@@ -51,6 +53,10 @@ Your goal is to complete the user's objective by iteratively planning, executing
      ```python script.py
      ... content ...
      ```
+
+# ERROR TRACKING:
+Check `error.md` to see a list of past mistakes. You MUST avoid repeating these errors.
+If you encounter an error during execution, document it in `error.md` for future reference.
 
 # TASK PLAN TEMPLATE:
 When initializing a new task, use this structure:
@@ -119,6 +125,7 @@ class TaskManager:
     def __init__(self):
         self.task_file = TASK_FILE
         self.notes_file = NOTES_FILE
+        self.error_file = ERROR_FILE
 
     def exists(self) -> bool:
         return self.task_file.exists()
@@ -127,6 +134,11 @@ class TaskManager:
         if not self.exists():
             return "No plan exists yet."
         return self.task_file.read_text(encoding="utf-8")
+
+    def read_errors(self) -> str:
+        if not self.error_file.exists():
+            return "No errors recorded yet."
+        return self.error_file.read_text(encoding="utf-8")
 
     def initialize_plan(self, goal: str, client: OllamaClient):
         print(f"Creating initial plan for goal: '{goal}'")
@@ -139,7 +151,8 @@ class TaskManager:
             "INSTRUCTIONS:\n"
             "1. You must acknowledge this goal and create the initial `task_plan.md`.\n"
             "2. Define phases to achieve exactly this goal. Use the template provided.\n"
-            "3. Respond ONLY with the markdown code block for `task_plan.md`."
+            "3. Create an initial empty `error.md` file to track future mistakes.\n"
+            "4. Respond ONLY with the markdown code blocks for `task_plan.md` and `error.md`."
         )
         response = client.generate(prompt, system=dynamic_system, stream=True)
         self.save_files_from_response(response)
@@ -205,15 +218,18 @@ def run_agent(goal: str, model: str, turns: int, continue_mode: bool):
         print(f"--- Turn {turn}/{turns} ---")
         
         current_plan = manager.read_plan()
+        current_errors = manager.read_errors()
         
         # Assemble Prompt
         prompt = (
             f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
+            f"Here are the known errors to avoid (`error.md`):\n\n{current_errors}\n\n"
             "INSTRUCTIONS:\n"
             "1. Analyze the plan to determine the next immediate step.\n"
             "2. Perform the work for that step (write code, create notes, etc.).\n"
             "3. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
-            "that marks the step as completed or updates the status.\n\n"
+            "that marks the step as completed or updates the status.\n"
+            "4. If you encounter an error or make a mistake, update `error.md`.\n\n"
             "Go."
         )
 
