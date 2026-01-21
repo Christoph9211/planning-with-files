@@ -413,7 +413,13 @@ class TaskManager:
             return "No errors recorded yet."
         return self.error_file.read_text(encoding="utf-8")
 
-    def initialize_plan(self, goal: str, client: OllamaClient):
+    def initialize_plan(
+        self,
+        goal: str,
+        client: OllamaClient,
+        context_text: Optional[str] = None,
+        context_path: Optional[Path] = None,
+    ):
         """
         Initialize a task plan for the given goal using the Ollama client.
         Dynamically injects the user's goal into the system prompt and requests
@@ -431,8 +437,14 @@ class TaskManager:
         # Inject the goal dynamically into the system prompt for strongest effect
         dynamic_system = SYSTEM_PROMPT.replace("[Description]", f"The user's specific goal is: {goal}")
         
-        prompt = (
-            f"You are starting a new task. The User's Goal is: '{goal}'\n\n"
+        prompt = f"You are starting a new task. The User's Goal is: '{goal}'\n\n"
+        if context_text:
+            context_label = str(context_path) if context_path else "context.py"
+            prompt += (
+                f"Here is additional context from `{context_label}`:\n"
+                f"```python\n{context_text}\n```\n\n"
+            )
+        prompt += (
             "INSTRUCTIONS:\n"
             "1. You must acknowledge this goal and create the initial `task_plan.md`.\n"
             "2. Define phases to achieve exactly this goal. Use the template provided.\n"
@@ -543,6 +555,17 @@ def run_agent(
     client = OllamaClient(model=model)
     manager = TaskManager()
     executor = CommandExecutor()
+    context_text = None
+    context_path = None
+    if context_file:
+        context_path = Path(context_file)
+        if context_path.suffix != ".py":
+            print("Error: --context-file must point to a .py file.")
+            sys.exit(1)
+        if not context_path.exists():
+            print(f"Error: Context file not found: {context_path}")
+            sys.exit(1)
+        context_text = context_path.read_text(encoding="utf-8")
     context_path = resolve_context_path(context_file)
     if context_path and not context_path.exists():
         print(f"[i] Context file not found yet: {context_path}")
@@ -552,7 +575,7 @@ def run_agent(
         if not goal:
             print("Error: No goal provided and no existing plan found.")
             sys.exit(1)
-        manager.initialize_plan(goal, client)
+        manager.initialize_plan(goal, client, context_text=context_text, context_path=context_path)
     elif goal and not continue_mode and manager.exists():
         print(f"[!] {TASK_FILE} already exists. Use --continue to resume or delete it to start over.")
         sys.exit(1)
@@ -571,22 +594,14 @@ def run_agent(
 
         shell_name, shell_family = describe_shell()
         # Assemble Prompt
-        prompt = (
-            f"Current working directory: {current_dir}\n\n"
-            f"Command shell: {shell_name} ({shell_family})\n\n"
-        )
-        if context_text:
-            prompt += (
-                f"Workspace context (from {context_path}):\n"
-                f"{context_text}\n\n"
-            )
-        prompt += f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
-        prompt += f"Here are the known errors to avoid (`error.md`):\n\n{current_errors}\n\n"
-
-        if missed_plan_update:
-            prompt += manager.plan_update_alert()
-            missed_plan_update = False
-
+        prompt = f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
+        if context_text and turn == 1 and continue_mode:
+            context_label = str(context_path) if context_path else "context.py"
+            prompt = (
+                f"Additional context from `{context_label}`:\n"
+                f"```python\n{context_text}\n```\n\n"
+            ) + prompt
+        
         if last_command_output:
             prompt += f"**LAST COMMAND OUTPUT**:\n```\n{last_command_output}\n```\n\n"
             last_command_output = "" # Clear after using
@@ -638,7 +653,13 @@ def run_agent(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI Agent with File-based Memory")
-    parser.add_argument("--goal", help="The main objective (required if starting new)")
+    parser.add_argument(
+        "-l",
+        "--context-file",
+        default=None,
+        help="Path to a .py file to include as initial context",
+    )
+    parser.add_argument("--goal",default=None, help="The main objective (required if starting new)")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Ollama model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--turns", type=int, default=5, help="Maximum number of turns to run")
     parser.add_argument("--continue", dest="continue_mode", action="store_true", help="Continue from existing plan")
@@ -654,7 +675,7 @@ if __name__ == "__main__":
         args.goal,
         args.model,
         args.turns,
-        args.continue_mode,
+        args.continue_mode, args.context_file,
         args.workdir,
         args.context_file,
     )
