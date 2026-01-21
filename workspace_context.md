@@ -1,7 +1,7 @@
 # Workspace Context
 
 Use this file to provide shared context that should be injected into every
-agent turn via `--context-file`. Keep it concise and up to date.
+agent turn via `--workspace-context`. Keep it concise and up to date.
 
 ## Project Summary
 

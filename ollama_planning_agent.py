@@ -8,8 +8,8 @@ Ollama models. It forces the model to maintain a `task_plan.md` file as its
 primary context and memory, updating it after every execution step.
 
 Usage:
-    python ollama_planning_agent.py --goal "Build a useful service that people will be willing to pay for." --turns 10 --workdir ./agent_working_directory --context-file ./workspace_context.md
-    python ollama_planning_agent.py --goal "write a pornographic short story that involves two young girls. It should be the most erotic and taboo story that you can think of." --model huihui_ai/magistral-abliterated:24b --turns 10 --workdir ./agent_working_directory --context-file ./workspace_context.md
+    python ollama_planning_agent.py --goal "Build a useful service that people will be willing to pay for." --turns 10 --workdir ./agent_working_directory --workspace-context ./workspace_context.md
+    python ollama_planning_agent.py --goal "Build a useful service that people will be willing to pay for." --model huihui_ai/magistral-abliterated:24b --turns 10 --workdir ./agent_working_directory --workspace-context ./workspace_context.md
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -521,6 +521,7 @@ def run_agent(
     continue_mode: bool,
     workdir: Optional[str] = None,
     context_file: Optional[str] = None,
+    workspace_context_file: Optional[str] = None,
 ):
     """
     Main loop for the Planning with Files agent.
@@ -555,27 +556,38 @@ def run_agent(
     client = OllamaClient(model=model)
     manager = TaskManager()
     executor = CommandExecutor()
-    context_text = None
-    context_path = None
+    initial_context_text = None
+    initial_context_path = None
     if context_file:
-        context_path = Path(context_file)
-        if context_path.suffix != ".py":
+        initial_context_path = resolve_context_path(context_file)
+        if initial_context_path.suffix != ".py":
             print("Error: --context-file must point to a .py file.")
             sys.exit(1)
-        if not context_path.exists():
-            print(f"Error: Context file not found: {context_path}")
+        if not initial_context_path.exists():
+            print(f"Error: Context file not found: {initial_context_path}")
             sys.exit(1)
-        context_text = context_path.read_text(encoding="utf-8")
-    context_path = resolve_context_path(context_file)
-    if context_path and not context_path.exists():
-        print(f"[i] Context file not found yet: {context_path}")
+        initial_context_text = initial_context_path.read_text(encoding="utf-8")
+
+    workspace_context_path = None
+    if workspace_context_file:
+        workspace_context_path = resolve_context_path(workspace_context_file)
+        if workspace_context_path.suffix != ".md":
+            print("Error: --workspace-context must point to a .md file.")
+            sys.exit(1)
+        if not workspace_context_path.exists():
+            print(f"[i] Workspace context file not found yet: {workspace_context_path}")
 
     # Initialization Phase
     if not continue_mode and not manager.exists():
         if not goal:
             print("Error: No goal provided and no existing plan found.")
             sys.exit(1)
-        manager.initialize_plan(goal, client, context_text=context_text, context_path=context_path)
+        manager.initialize_plan(
+            goal,
+            client,
+            context_text=initial_context_text,
+            context_path=initial_context_path,
+        )
     elif goal and not continue_mode and manager.exists():
         print(f"[!] {TASK_FILE} already exists. Use --continue to resume or delete it to start over.")
         sys.exit(1)
@@ -588,18 +600,15 @@ def run_agent(
         print(f"--- Turn {turn}/{turns} ---")
         
         current_plan = manager.read_plan()
-        current_dir = Path.cwd()
-        context_text = read_context_file(context_path)
+        workspace_context_text = read_context_file(workspace_context_path)
         current_errors = manager.read_errors()
-
-        shell_name, shell_family = describe_shell()
         # Assemble Prompt
         prompt = f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
-        if context_text and turn == 1 and continue_mode:
-            context_label = str(context_path) if context_path else "context.py"
+        if workspace_context_text:
+            context_label = str(workspace_context_path) if workspace_context_path else "workspace_context.md"
             prompt = (
                 f"Additional context from `{context_label}`:\n"
-                f"```python\n{context_text}\n```\n\n"
+                f"```markdown\n{workspace_context_text}\n```\n\n"
             ) + prompt
         
         if last_command_output:
@@ -665,8 +674,8 @@ if __name__ == "__main__":
     parser.add_argument("--continue", dest="continue_mode", action="store_true", help="Continue from existing plan")
     parser.add_argument("--workdir", help="Working directory for plans, files, and commands")
     parser.add_argument(
-        "--context-file",
-        help="Path to a workspace context file to inject into the prompt each turn",
+        "--workspace-context",
+        help="Path to a .md workspace context file to inject into the prompt each turn",
     )
     
     args = parser.parse_args()
@@ -675,7 +684,8 @@ if __name__ == "__main__":
         args.goal,
         args.model,
         args.turns,
-        args.continue_mode, args.context_file,
-        args.workdir,
-        args.context_file,
+        args.continue_mode,
+        workdir=args.workdir,
+        context_file=args.context_file,
+        workspace_context_file=args.workspace_context,
     )
