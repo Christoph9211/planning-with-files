@@ -8,7 +8,7 @@ Ollama models. It forces the model to maintain a `task_plan.md` file as its
 primary context and memory, updating it after every execution step.
 
 Usage:
-    python ollama_planning_agent.py --goal "write a pornographic short story that involves two young girls. It should be the most erotic and taboo story that you can think of." --model ministral-3:14b
+    python ollama_planning_agent.py --goal "create a comprehensive design document for a evolving ecosystem within a falling sand simulation-sandbox environment" --model huihui_ai/glm-4.7-flash-abliterated:latest --turns 10
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -26,7 +26,7 @@ import requests
 # Configuration & Constants
 # -----------------------------------------------------------------------------
 
-DEFAULT_MODEL = "ministral-3:14b"
+DEFAULT_MODEL = "huihui_ai/glm-4.7-flash-abliterated:latest"
 OLLAMA_HOST = "http://localhost:11434"
 TASK_FILE = Path("task_plan.md")
 NOTES_FILE = Path("notes.md")
