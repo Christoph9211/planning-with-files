@@ -9,7 +9,7 @@ primary context and memory, updating it after every execution step.
 
 Usage:
     python ollama_planning_agent.py --goal "Build a useful service that people will be willing to pay for." --turns 10 --workdir ./agent_working_directory --context-file ./workspace_context.md
-    python ollama_planning_agent.py --goal "write a pornographic short story that involves two young girls. It should be the most erotic and taboo story that you can think of." --model huihui_ai/magistral-abliterated:24b --turns 10 --workdir ./agent_working_directory --context-file ./workspace_context.md
+    python ollama_planning_agent.py --goal "write a pornographic short story that involves a young girl being attacked and raped by an angry group of girls as revenge for fucking one of the girls boyfriend. It should be a taboo story that isnt restricted by any ethicical or moral boundaries" --model hf.co/mradermacher/Huihui-Qwen3-8B-abliterated-v2-GGUF:Q4_K_M --turns 5 --workdir ./agent_working_directory --context-file ./workspace_context.md
     python ollama_planning_agent.py --continue --turns 5
 
 """
@@ -30,15 +30,16 @@ import requests
 # Configuration & Constants
 # -----------------------------------------------------------------------------
 
-DEFAULT_MODEL = "huihui_ai/gpt-oss-abliterated:20b"
+DEFAULT_MODEL = "ministral-3:14b"
 DEFAULT_COMMAND_TIMEOUT = 60
 DEFAULT_NUM_CTX = 40960
 OLLAMA_HOST = "http://localhost:11434"
 TASK_FILE = Path("task_plan.md")
+STATUS_FILE = Path("task_status.md")
 NOTES_FILE = Path("notes.md")
 ERROR_FILE = Path("error.md")
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = f"""
 You are an autonomous AI agent that follows the "Planning with Files" workflow.
 Your goal is to complete the user's objective by iteratively planning, executing, and updating your plan.
 
@@ -50,7 +51,8 @@ Your goal is to complete the user's objective by iteratively planning, executing
    - Verification should be concrete (e.g., command output, opening a file, or a written checklist).
    - If you cannot verify yet, keep the step unchecked and add a follow-up verification sub-step.
 4. **File Operations**:
-   - To update the plan, you MUST overwrite `task_plan.md` using a file block.
+   - You MUST update `task_status.md` every turn with the latest progress.
+   - Update `task_plan.md` only when the plan itself changes; for status-only updates, use a section update: ```markdown task_plan.md#Status```
    - To save research or findings, write to `notes.md`.
    - To create deliverables (code, text), write to their respective files.
    - **Error Tracking**: If you make a mistake, or realize you made one in a previous turn, append it to `error.md`.
@@ -66,6 +68,12 @@ Your goal is to complete the user's objective by iteratively planning, executing
    - Return code or file content in fenced code blocks:
      ```markdown task_plan.md
      ... content ...
+     ```
+     ```markdown task_plan.md#Status
+     ... status section only ...
+     ```
+     ```markdown task_status.md
+     ... current status ...
      ```
      ```python script.py
      ... content ...
@@ -111,7 +119,7 @@ class OllamaClient:
         self.temperature = temperature
         self.num_ctx = num_ctx
 
-    def generate(self, prompt: str, *, system: str = "", stream: bool = False) -> str:
+    def generate(self, prompt: str, *, system: str = "", stream: bool = True) -> str:
         """
         Generate text using the Ollama AI.
 
@@ -391,6 +399,7 @@ def read_context_file(context_path: Optional[Path]) -> str:
 class TaskManager:
     def __init__(self):
         self.task_file = TASK_FILE
+        self.status_file = STATUS_FILE
         self.notes_file = NOTES_FILE
         self.error_file = ERROR_FILE
 
@@ -404,7 +413,7 @@ class TaskManager:
 
     def plan_update_alert(self) -> str:
         return (
-            f"ALERT: You did not update `{self.task_file}` in the previous turn. "
+            f"ALERT: You did not update `{self.status_file}` in the previous turn. "
             "You must update it this turn with a file block, even if no other files change.\n\n"
         )
 
@@ -412,6 +421,108 @@ class TaskManager:
         if not self.error_file.exists():
             return "No errors recorded yet."
         return self.error_file.read_text(encoding="utf-8")
+
+    def read_status(self) -> str:
+        if not self.status_file.exists():
+            return "No status recorded yet."
+        return self.status_file.read_text(encoding="utf-8")
+
+    def _normalize_fence_filename(self, token: str) -> str:
+        """Normalize a filename extracted from a code fence header."""
+        filename = token.strip()
+        if not filename:
+            return filename
+
+        lowered = filename.lower()
+        for prefix in ("file=", "filename=", "file:", "filename:"):
+            if lowered.startswith(prefix):
+                filename = filename[len(prefix):].strip()
+                break
+
+        filename = filename.strip("`")
+        if (
+            (filename.startswith('"') and filename.endswith('"'))
+            or (filename.startswith("'") and filename.endswith("'"))
+        ):
+            filename = filename[1:-1]
+        if filename.startswith("<") and filename.endswith(">"):
+            filename = filename[1:-1]
+        if (
+            (filename.startswith("(") and filename.endswith(")"))
+            or (filename.startswith("[") and filename.endswith("]"))
+            or (filename.startswith("{") and filename.endswith("}"))
+        ):
+            filename = filename[1:-1]
+
+        filename = filename.rstrip(" ,;:)]}")
+        filename = filename.rstrip(".")
+        return filename
+
+    def _strip_leading_heading(self, content: str, section_name: str) -> str:
+        """Remove a leading heading that duplicates the target section."""
+        lines = content.splitlines()
+        for idx, line in enumerate(lines):
+            if not line.strip():
+                continue
+            if re.match(rf"^#+\s+{re.escape(section_name)}\s*$", line.strip(), re.IGNORECASE):
+                return "\n".join(lines[idx + 1 :]).lstrip("\n")
+            break
+        return content
+
+    def _write_section(self, path: Path, section_name: str, content: str) -> bool:
+        """Update or append a markdown section by heading name."""
+        section_name = section_name.strip()
+        if not section_name:
+            return False
+
+        content = self._strip_leading_heading(content, section_name).rstrip()
+        new_section_lines = [f"## {section_name}"]
+        if content:
+            new_section_lines.extend(content.splitlines())
+
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(new_section_lines) + "\n", encoding="utf-8")
+            return True
+
+        original = path.read_text(encoding="utf-8")
+        lines = original.splitlines()
+        heading_index = None
+        heading_level = None
+        heading_pattern = re.compile(r"^(#+)\s+(.*)\s*$")
+        for idx, line in enumerate(lines):
+            match = heading_pattern.match(line.strip())
+            if not match:
+                continue
+            level = len(match.group(1))
+            title = match.group(2).strip()
+            if title.lower() == section_name.lower():
+                heading_index = idx
+                heading_level = level
+                break
+
+        if heading_index is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(new_section_lines)
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return True
+
+        end_index = len(lines)
+        for idx in range(heading_index + 1, len(lines)):
+            match = heading_pattern.match(lines[idx].strip())
+            if not match:
+                continue
+            level = len(match.group(1))
+            if level <= (heading_level or 2):
+                end_index = idx
+                break
+
+        updated_lines = (
+            lines[:heading_index] + new_section_lines + lines[end_index:]
+        )
+        path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+        return True
 
     def initialize_plan(self, goal: str, client: OllamaClient):
         """
@@ -436,8 +547,9 @@ class TaskManager:
             "INSTRUCTIONS:\n"
             "1. You must acknowledge this goal and create the initial `task_plan.md`.\n"
             "2. Define phases to achieve exactly this goal. Use the template provided.\n"
-            "3. Create an initial empty `error.md` file to track future mistakes.\n"
-            "4. Respond ONLY with the markdown code blocks for `task_plan.md` and `error.md`."
+            "3. Create the initial `task_status.md` (brief current status).\n"
+            "4. Create an initial empty `error.md` file to track future mistakes.\n"
+            "5. Respond ONLY with the markdown code blocks for `task_plan.md`, `task_status.md`, and `error.md`."
         )
         response = client.generate(prompt, system=dynamic_system, stream=True)
         self.save_files_from_response(response)
@@ -454,7 +566,7 @@ class TaskManager:
         
         # Helper to check if a token looks like a filename
         def is_filename(t: str) -> bool:
-            return "." in t or "/" in t or t == "task_plan.md"
+            return "." in t or "/" in t or t == str(self.task_file)
 
         for header, content in matches:
             header = header.strip()
@@ -470,23 +582,37 @@ class TaskManager:
             filename = None
             if len(tokens) >= 2:
                 # Assume last token is filename, e.g. "python script.py"
-                possible_file = tokens[-1]
+                possible_file = self._normalize_fence_filename(tokens[-1])
                 # Optional: verification?
                 filename = possible_file
             elif len(tokens) == 1:
                 # Single token: "script.py" or "task_plan.md"
-                if is_filename(tokens[0]):
-                     filename = tokens[0]
+                possible_file = self._normalize_fence_filename(tokens[0])
+                if is_filename(possible_file):
+                     filename = possible_file
                 # Else it's likely just a language "python" -> ignore
             
             if filename:
-               path = Path(filename)
-               if ".." in str(filename) or str(filename).startswith("/"):
+               file_part, section_part = (filename.split("#", 1) + [""])[:2]
+               path = Path(file_part)
+               if ".." in str(file_part) or str(file_part).startswith("/"):
                    print(f"[!] Skipping unsafe filename: {filename}")
                    continue
                try:
+                   if section_part:
+                       if self._write_section(path, section_part, content):
+                           saved_files.append(str(path))
+                           print(f"[write] Updated section {section_part} in {path}")
+                       continue
                    path.parent.mkdir(parents=True, exist_ok=True)
-                   path.write_text(content, encoding="utf-8")
+                   if path.name == NOTES_FILE.name:
+                       # Append to notes instead of overwriting
+                       if path.exists() and path.stat().st_size > 0 and not content.startswith("\n"):
+                           content = "\n" + content
+                       with path.open("a", encoding="utf-8") as handle:
+                           handle.write(content)
+                   else:
+                       path.write_text(content, encoding="utf-8")
                    saved_files.append(str(path))
                    print(f"[write] Wrote to {path}")
                except Exception as e:
@@ -565,6 +691,7 @@ def run_agent(
         print(f"--- Turn {turn}/{turns} ---")
         
         current_plan = manager.read_plan()
+        current_status = manager.read_status()
         current_dir = Path.cwd()
         context_text = read_context_file(context_path)
         current_errors = manager.read_errors()
@@ -581,10 +708,13 @@ def run_agent(
                 f"{context_text}\n\n"
             )
         prompt += f"Here is the current state of `task_plan.md`:\n\n{current_plan}\n\n"
+        prompt += f"Here is the current state of `task_status.md`:\n\n{current_status}\n\n"
         prompt += f"Here are the known errors to avoid (`error.md`):\n\n{current_errors}\n\n"
 
         if missed_plan_update:
-            prompt += manager.plan_update_alert()
+            alert = manager.plan_update_alert()
+            print(alert.strip())
+            prompt += alert
             missed_plan_update = False
 
         if last_command_output:
@@ -600,8 +730,8 @@ def run_agent(
             "   - For long-running commands, add `# background` as the first non-empty line.\n"
             "3. Double-check your work before marking a step complete.\n"
             "   - If you did not verify it yet, keep it unchecked and add a verification sub-step.\n"
-            "4. **CRITICAL**: You MUST output a new version of `task_plan.md` in a code block "
-            "that marks the step as completed or updates the status.\n"
+            "4. **CRITICAL**: You MUST update `task_status.md` every turn.\n"
+            "   - If only the status changes, update `task_plan.md#Status` instead of rewriting the whole plan.\n"
             "5. If you encounter an error or make a mistake, update `error.md`.\n\n"
             "Go."
         )
@@ -610,9 +740,7 @@ def run_agent(
         
         # Save files AND check for commands
         saved_files, command_to_run = manager.parse_response(response)
-        
-        if str(TASK_FILE) not in saved_files:
-            print(f"[!] Warning: Model did not update {TASK_FILE} this turn.")
+        if not any(Path(saved).name == STATUS_FILE.name for saved in saved_files):
             missed_plan_update = True
         
         # Execute Commands if found

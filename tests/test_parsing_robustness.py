@@ -3,6 +3,7 @@ import unittest
 from ollama_planning_agent import TaskManager
 import os
 import shutil
+import tempfile
 
 class TestParserRobustness(unittest.TestCase):
     def setUp(self):
@@ -91,6 +92,31 @@ print("Space before python")
         """
         files, cmds = self.manager.save_files_from_response(response)
         self.assertEqual(files, [])
+
+    def test_section_update_status(self):
+        response = """
+```markdown task_plan.md#Status
+Status line one.
+Status line two.
+```
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                plan_path = os.path.join(tmpdir, "task_plan.md")
+                with open(plan_path, "w", encoding="utf-8") as handle:
+                    handle.write("# Task Plan\n## Goal\nDemo\n## Status\nOld\n")
+                files, cmds = self.manager.save_files_from_response(response)
+                self.assertIn("task_plan.md", files)
+                with open(plan_path, "r", encoding="utf-8") as handle:
+                    updated = handle.read()
+                self.assertIn("## Status", updated)
+                self.assertIn("Status line one.", updated)
+                self.assertIn("Status line two.", updated)
+                self.assertNotIn("Old", updated)
+            finally:
+                os.chdir(original_cwd)
 
 
 if __name__ == '__main__':

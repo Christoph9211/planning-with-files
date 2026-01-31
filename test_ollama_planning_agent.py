@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ollama_planning_agent import TASK_FILE, TaskManager, run_agent
+from ollama_planning_agent import STATUS_FILE, TASK_FILE, TaskManager, run_agent
 
 
 class TestSaveFilesFromResponse(unittest.TestCase):
@@ -63,7 +63,7 @@ class TestPlanUpdateAlert(unittest.TestCase):
                 with patch("ollama_planning_agent.OllamaClient.generate", new=fake_generate), \
                     patch(
                         "ollama_planning_agent.TaskManager.parse_response",
-                        side_effect=[([], []), ([str(TASK_FILE)], [])],
+                        side_effect=[([], []), ([str(STATUS_FILE)], [])],
                     ), \
                     patch("ollama_planning_agent.time.sleep"):
                     run_agent(
@@ -79,7 +79,7 @@ class TestPlanUpdateAlert(unittest.TestCase):
 
         self.assertGreaterEqual(len(prompts), 2)
         self.assertIn(
-            "ALERT: You did not update `task_plan.md` in the previous turn.",
+            "ALERT: You did not update `task_status.md` in the previous turn.",
             prompts[1],
         )
 
